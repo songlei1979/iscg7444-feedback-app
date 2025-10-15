@@ -106,4 +106,5 @@ def export_feedback():
 # As a developer, I want to write tests (not shown here, add in separate test file)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000)
+
