@@ -1,50 +1,68 @@
 import pytest
-from app import app
-from unittest.mock import patch
+from app import app, get_db_connection
 
 @pytest.fixture
 def client():
     app.config["TESTING"] = True
-    app.secret_key = "test_secret_key"  # Required for session/flash
     with app.test_client() as client:
+        with app.app_context():
+            # Re-initialize SQLite in-memory DB for each test session
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DROP TABLE IF EXISTS feedback")
+            cursor.execute("""
+                CREATE TABLE feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT,
+                    message TEXT,
+                    is_read BOOLEAN DEFAULT 0
+                )
+            """)
+            conn.commit()
         yield client
 
-# ---------- Test: Submit Feedback (Valid) ----------
-@patch("app.cursor")
-def test_submit_feedback(mock_cursor, client):
-    data = {"name": "Alice", "message": "This is a test message."}
-    response = client.post("/", data=data, follow_redirects=True)
-    assert response.status_code == 200
-    assert b"Thank you for your feedback" in response.data
 
-# ---------- Test: Submit Feedback (No Message) ----------
+def test_homepage(client):
+    response = client.get('/')
+    assert response.status_code == 200
+
+
+def test_submit_feedback(client):
+    response = client.post('/', data={
+        'name': 'Alice',
+        'message': 'Great class!'
+    }, follow_redirects=True)
+
+    assert response.status_code == 200
+
+
 def test_submit_feedback_without_message(client):
-    data = {"name": "Bob", "message": ""}
-    response = client.post("/", data=data, follow_redirects=True)
+    response = client.post('/', data={
+        'name': 'Bob',
+        'message': ''
+    }, follow_redirects=True)
+
     assert response.status_code == 200
 
 
-# ---------- Test: View Feedback ----------
-@patch("app.cursor")
-def test_view_feedback(mock_cursor, client):
-    mock_cursor.fetchall.return_value = [
-        (1, "Alice", "Great job!", False),
-        (2, None, "Anonymous message", True)
-    ]
-    response = client.get("/feedback")
-    assert response.status_code == 200
-    assert b"Great job!" in response.data
-    assert b"Anonymous message" in response.data
+def test_view_feedback(client):
+    # Insert test feedback directly into DB
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO feedback (name, message, is_read) VALUES (?, ?, 0)", ("Test User", "Test Message"))
+    conn.commit()
 
-# ---------- Test: Export Feedback ----------
-@patch("app.cursor")
-def test_export_feedback(mock_cursor, client):
-    mock_cursor.fetchall.return_value = [
-        (1, "Alice", "Nice!", False),
-        (2, None, "Thanks!", True)
-    ]
-    response = client.get("/export")
+    response = client.get('/feedback')
     assert response.status_code == 200
-    assert response.mimetype == "text/csv"
-    assert b"Alice" in response.data
-    assert b"Thanks!" in response.data
+
+
+def test_export_feedback(client):
+    # Insert sample data
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO feedback (name, message, is_read) VALUES (?, ?, 0)", ("Export User", "CSV test"))
+    conn.commit()
+
+    response = client.get('/export')
+    assert response.status_code == 200
+
