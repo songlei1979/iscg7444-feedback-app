@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, send_file, flash
+from flask import Flask, render_template, request, redirect, url_for, send_file, flash, g
 from flask_cors import CORS
 import os
 import psycopg2
@@ -14,11 +14,17 @@ CORS(app)
 app.secret_key = os.getenv("SECRET_KEY", "test_secret_key")
 
 # ---------------------------------------------------------
-# ✅ Database Connection: Switch between PostgreSQL and SQLite
+# ✅ Lazy DB Connection — choose PostgreSQL or SQLite dynamically
 # ---------------------------------------------------------
 def get_db_connection():
-    if app.config.get("TESTING"):
-        # Use in-memory SQLite for tests
+    # Return cached connection if exists
+    if hasattr(g, "_database"):
+        return g._database
+
+    testing_mode = app.config.get("TESTING") or os.getenv("GITHUB_ACTIONS") == "true"
+
+    if testing_mode:
+        # Use SQLite in-memory DB for GitHub Actions or pytest
         conn = sqlite3.connect(":memory:", check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("""
@@ -30,19 +36,26 @@ def get_db_connection():
             )
         """)
         conn.commit()
-        return conn
+        g._database = conn
+        app.logger.info("✅ Using SQLite for testing environment")
     else:
-        # Use PostgreSQL for production / development
-        return psycopg2.connect(
+        # Use PostgreSQL in normal run
+        conn = psycopg2.connect(
             host=os.getenv("PGHOST"),
             user=os.getenv("PGUSER"),
             password=os.getenv("PGPASSWORD"),
             database=os.getenv("PGDATABASE")
         )
+        g._database = conn
+        app.logger.info("✅ Connected to PostgreSQL database")
 
-# Create connection and cursor
-conn = get_db_connection()
-cursor = conn.cursor()
+    return g._database
+
+@app.teardown_appcontext
+def close_connection(exception):
+    db = getattr(g, "_database", None)
+    if db is not None:
+        db.close()
 
 # ---------------------------------------------------------
 # Routes
@@ -50,6 +63,8 @@ cursor = conn.cursor()
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
+    conn = get_db_connection()
+    cursor = conn.cursor()
     if request.method == 'POST':
         name = request.form.get('name') or None
         message = request.form.get('message')
@@ -59,9 +74,10 @@ def index():
             return redirect(url_for('index'))
 
         try:
-            cursor.execute("INSERT INTO feedback (name, message, is_read) VALUES (?, ?, 0)" if app.config.get("TESTING")
-                           else "INSERT INTO feedback (name, message, is_read) VALUES (%s, %s, false)",
-                           (name, message))
+            if isinstance(conn, sqlite3.Connection):
+                cursor.execute("INSERT INTO feedback (name, message, is_read) VALUES (?, ?, 0)", (name, message))
+            else:
+                cursor.execute("INSERT INTO feedback (name, message, is_read) VALUES (%s, %s, false)", (name, message))
             conn.commit()
             return redirect(url_for('thank_you'))
         except Exception as e:
@@ -75,6 +91,8 @@ def index():
 
 @app.route('/feedback')
 def view_feedback():
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT id, name, message, is_read FROM feedback ORDER BY id DESC")
     feedbacks = cursor.fetchall()
     return render_template('feedback.html', feedbacks=feedbacks)
@@ -82,16 +100,24 @@ def view_feedback():
 
 @app.route('/feedback/read/<int:id>')
 def mark_as_read(id):
-    cursor.execute("UPDATE feedback SET is_read = 1 WHERE id = ?" if app.config.get("TESTING")
-                   else "UPDATE feedback SET is_read = true WHERE id = %s", (id,))
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if isinstance(conn, sqlite3.Connection):
+        cursor.execute("UPDATE feedback SET is_read = 1 WHERE id = ?", (id,))
+    else:
+        cursor.execute("UPDATE feedback SET is_read = true WHERE id = %s", (id,))
     conn.commit()
     return redirect(url_for('view_feedback'))
 
 
 @app.route('/feedback/delete/<int:id>')
 def delete_feedback(id):
-    cursor.execute("DELETE FROM feedback WHERE id = ?" if app.config.get("TESTING")
-                   else "DELETE FROM feedback WHERE id = %s", (id,))
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    if isinstance(conn, sqlite3.Connection):
+        cursor.execute("DELETE FROM feedback WHERE id = ?", (id,))
+    else:
+        cursor.execute("DELETE FROM feedback WHERE id = %s", (id,))
     conn.commit()
     return redirect(url_for('view_feedback'))
 
@@ -103,6 +129,8 @@ def thank_you():
 
 @app.route('/export')
 def export_feedback():
+    conn = get_db_connection()
+    cursor = conn.cursor()
     cursor.execute("SELECT id, name, message, is_read FROM feedback ORDER BY id")
     feedbacks = cursor.fetchall()
 
